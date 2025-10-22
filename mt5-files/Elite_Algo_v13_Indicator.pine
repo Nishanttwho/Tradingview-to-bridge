@@ -1,0 +1,794 @@
+//@version=4
+study("Elite Algo 13 - Indicator", shorttitle="Elite v13", overlay=true, precision=0)
+
+// ============================================================================
+// CONVERTED TO INDICATOR WITH ALERTS
+// Original: Elite Algo v13 Strategy
+// This indicator version provides the same signals with alert functionality
+// ============================================================================
+
+// Elite dashboard settings
+showDashboard = input(true, title="Enable dashboard", inline="dashboard", group="Elite dashboard settings")
+dashboardType = input('Simple dashboard', title="", 
+     options=['Simple dashboard', 'Advanced dashboard'], inline="dashboard", group="Elite dashboard settings")
+xDashBoard = input(80,"dashboard distance",minval=20, maxval= 1000, step = 10, group="Elite dashboard settings")
+
+// Buy & Sell signals settings
+showSignals = input(true, title="Show buy & sell signals", group="Enable momentum candles")
+entryAtrMultiplier = input(0.5, "Sensitivity", minval=0.5, maxval=1000, step=0.1, group="Enable momentum candles")
+enableMomentum = input(false, title="Enable momentum candles", group="Enable momentum candles")
+
+// Alert settings
+enableAlerts = input(true, title="Enable Alerts", group="Alert Settings")
+
+// Risk management settings
+tslToggle = input(false, title="Enable trailing stop-loss", group="Risk management settings")
+showAreas = input(false, title="Enable take profit/stop-loss areas", group="Risk management settings")
+showpp = input(false, title = "Show Swing High's & Swing Low's", group="Risk management settings")
+
+// Trend cloud settings
+atrCloudShow = input(true, title="Show the ATR cloud", group="Trend cloud settings")
+atrCloudConf = input('Long term', title="ATR cloud period",
+     options=['Long term', 'Short term'], group="Trend cloud settings")
+atrCloudFiler = input(true, title="Trend only signals", group="Trend cloud settings")
+
+// Auto trendlines settings
+showTC = input(false, title="Enable auto trendlines", group="Auto trendlines settings")
+tSrc = input('Open/Close', title="Trend Channel source",
+     options=['Open/Close', 'High/Low'], group="Auto trendlines settings")
+period = input(200, title="Trend Channel loopback", minval=50, group="Auto trendlines settings")
+
+// Auto support and resistance settings
+showSR = input(false, title="Enable Auto Support and Resistance", type=input.bool,
+     group="Auto support and resistance settings")
+linestyle = input(defval = 'Dotted', title = "Line Style", options = ['Solid', 'Dotted', 'Dashed'],
+     group="Auto support and resistance settings")
+linewidth = input(defval = 1, title = "Line Width", minval = 1, maxval = 4,
+     group="Auto support and resistance settings")
+
+// Internal settings
+showMiddle = true
+showLabels = false
+tLinewidth = 1
+tColor = color.blue
+useCurrentRes = true
+resCustom = 'W'
+
+// Support and resistance inputs
+maxnumsr = 5
+resistancecolor = color.red
+supportcolor = color.lime
+prd = 10
+ppsrc = 'High/Low'
+maxnumpp = 20
+ChannelW = 10
+min_strength = 1
+entryAtrPeriod = 21
+
+// ============================================================================
+// HEIKIN-ASHI CALCULATIONS
+// ============================================================================
+newOpen   = float(na)
+newClose = ohlc4
+newOpen := na(newOpen[1]) ? (open + close) / 2 : (nz(newOpen[1]) + nz(newClose[1])) / 2
+newLow = min(low,  min(newOpen, newClose))
+newHigh= max(high, max(newOpen, newClose))
+
+// ============================================================================
+// SUPERTREND (ATR CLOUD)
+// ============================================================================
+atrPeriod = atrCloudConf == 'Long term' ? 20 : 10
+factor = atrCloudConf == 'Long term' ? 5 : 3
+
+[supertrend, direction] = supertrend(factor, atrPeriod)
+
+// ============================================================================
+// ATR TRAILING STOP-LOSS (Calculate early for SL/TP)
+// ============================================================================
+nATRPeriod = 14
+nATRMultip = 2.5
+
+xATR = atr(nATRPeriod)
+nLoss = nATRMultip * xATR
+
+// ============================================================================
+// ENTRY ATR
+// ============================================================================
+entryAtrValue = atr(entryAtrPeriod)
+entryAtrLoss = entryAtrMultiplier * entryAtrValue
+entryAtr = 0.0
+entryAtr := 
+ iff(newClose > nz(entryAtr[1], 0) and newClose[1] > nz(entryAtr[1], 0), max(nz(entryAtr[1]), newClose - entryAtrLoss),
+  iff(newClose < nz(entryAtr[1], 0) and newClose[1] < nz(entryAtr[1], 0), min(nz(entryAtr[1]), newClose + entryAtrLoss), 
+   iff(newClose > nz(entryAtr[1], 0), newClose - entryAtrLoss, newClose + entryAtrLoss))) 
+                       
+entryAtrPos = 0.0
+entryAtrPos := 
+ iff(newClose[1] < nz(entryAtr[1], 0) and newClose > nz(entryAtr[1], 0), 1, 
+  iff(newClose[1] > nz(entryAtr[1], 0) and newClose < nz(entryAtr[1], 0), -1, nz(entryAtrPos[1], 0)))
+
+// ============================================================================
+// POSITION TRACKING
+// ============================================================================
+isLong = false
+isLong := nz(isLong[1], false)
+
+isShort = false
+isShort := nz(isShort[1], false)
+
+LONG = not isLong and entryAtrPos == 1
+SHORT = not isShort and entryAtrPos == -1
+
+if (LONG)
+    isLong := true
+    isShort := false
+
+if (SHORT)
+    isLong := false
+    isShort := true
+
+var positionLong = 0
+var positionShort = 0
+
+var tpTrackerLong = 0
+var tpTrackerShort = 0
+
+var exitLong = false
+var exitShort = false
+
+// ============================================================================
+// ENTRY CONDITIONS
+// ============================================================================
+entryLong = (LONG and 
+     positionLong[1] == 0 and positionShort[1] == 0 and (atrCloudFiler ? direction == -1 : true)) or exitLong[1]
+entryShort = (SHORT and 
+     positionShort[1] == 0 and positionLong[1] == 0 and (atrCloudFiler ? direction == 1 : true)) or exitShort[1]
+
+// SMA 200 for Smart signals
+smaLabel = sma(newClose, 200)
+
+// ============================================================================
+// INVISIBLE PLOTS FOR ALERT PLACEHOLDERS - MUST BE FIRST!
+// These are plot_0, plot_1, plot_2, plot_3 for easy reference in alerts
+// FIXED: Now uses actual ATR-based SL/TP calculations at signal time
+// ============================================================================
+plot(entryLong ? close - nLoss : na, title="BUY_SL", display=display.none)
+plot(entryLong ? close + nLoss : na, title="BUY_TP", display=display.none)
+plot(entryShort ? close + nLoss : na, title="SELL_SL", display=display.none)
+plot(entryShort ? close - nLoss : na, title="SELL_TP", display=display.none)
+
+// ============================================================================
+// CLOUD PLOTS
+// ============================================================================
+bodyMiddle = plot((open + close) / 2, display=display.none, editable=false)
+upTrend = plot(direction < 0 and atrCloudShow ? supertrend : na, "Up Trend", color = color.green, style=plot.style_linebr)
+downTrend = plot(direction > 0 and atrCloudShow ? supertrend : na, "Down Trend", color = color.red, style=plot.style_linebr)
+
+fill(bodyMiddle, upTrend, color.new(color.green, 90), fillgaps=false)
+fill(bodyMiddle, downTrend, color.new(color.red, 90), fillgaps=false)
+
+// ============================================================================
+// TREND CHANNEL SCRIPT
+// ============================================================================
+truncateTC(number, decimals) =>
+    factor = pow(10, decimals)
+    int(number * factor) / factor
+
+otherHighestY = 0.0
+otherLowestY = 0.0
+fallingPointX = 0
+fallingPointY = 0.0
+mid_fallingY1 = 0.0
+mid_fallingY2 = 0.0
+risingPointX = 0
+risingPointY = 0.0
+mid_risingY1 = 0.0
+mid_risingY2 = 0.0
+
+if showTC
+    srcHigh = (tSrc == 'Open/Close' ? newClose : newHigh)
+    srcLow = (tSrc == 'Open/Close' ? newClose : newLow)
+    
+    highestY = highest(srcHigh, period + 1)
+    highestX = bar_index + highestbars(srcHigh, period + 1)
+    
+    lowestY = lowest(srcLow, period + 1)
+    lowestX = bar_index + lowestbars(srcLow, period + 1)
+    
+    differenceX = (highestX - lowestX)
+    
+    otherHighestY := lowestY == srcLow ? srcHigh : srcHigh > nz(otherHighestY[1]) ? srcHigh : nz(otherHighestY[1])
+    otherHighestX = valuewhen((otherHighestY != otherHighestY[1])[1], bar_index, 0)
+    
+    otherLowestY := highestY == srcHigh ? srcLow : srcLow < nz(otherLowestY[1]) ? srcLow : nz(otherLowestY[1])
+    otherLowestX = valuewhen((otherLowestY != otherLowestY[1])[1], bar_index, 0)
+    
+    pullValueFalling = (100 * (otherHighestY - lowestY)) / (highestY - lowestY)
+    plotValueRising = (100 * (otherLowestY - highestY)) / (lowestY - highestY)
+    
+    line l_falling = na
+    line l_fallingOther = na
+    line mid_falling = na
+    label low_falling = na
+    label high_falling = na
+    label pull_falling = na
+    
+    if differenceX < 0
+        l_falling := line.new(x1 = highestX, y1 = highestY, x2 = otherHighestX, y2 = otherHighestY,
+             extend=extend.right, color=tColor, width=tLinewidth)
+        line.delete(l_falling[1])
+    
+        fallingPointX := highestX 
+        fallingPointY := highestY - (line.get_price(l_falling, lowestX) - lowestY)
+        
+        l_fallingOther := line.new(x1 = fallingPointX, y1 = fallingPointY, x2 = lowestX, y2 = lowestY,
+             extend=extend.right, color=tColor, width=tLinewidth)
+        line.delete(l_fallingOther[1])
+    
+        mid_fallingY1 := (line.get_price(l_falling, highestX) + line.get_price(l_fallingOther, highestX)) / 2
+        mid_fallingY2 := (line.get_price(l_falling, otherLowestX) + line.get_price(l_fallingOther, otherLowestX)) / 2
+        
+        if showMiddle
+            mid_falling := line.new(x1 = highestX, y1 = mid_fallingY1, x2 = otherLowestX, y2 = mid_fallingY2,
+                 extend=extend.right, color=color.gray, width=tLinewidth)
+            line.delete(mid_falling[1])
+        
+        if showLabels
+            low_falling := label.new(x = lowestX, y = lowestY, text="Low: " + tostring(lowestY),
+                 color=color.red, textcolor=color.white, style=label.style_label_up)
+            label.delete(low_falling[1])
+            
+            high_falling := label.new(x = highestX, y = highestY, text="High: " + tostring(highestY),
+                 color=color.red, textcolor=color.white, style=label.style_label_down)
+            label.delete(high_falling[1])
+            
+            pull_falling := label.new(x = otherHighestX, y = otherHighestY, text="Pullback: " + tostring(otherHighestY) + " / " + 
+                 tostring(truncateTC(pullValueFalling, 2))+ "%", color=color.blue, textcolor=color.white,
+                 style=label.style_label_down)
+            label.delete(pull_falling[1])
+    
+    if differenceX > 0 and differenceX[1] <= 0
+        line.delete(l_falling[1])
+        line.delete(l_fallingOther[1])
+        line.delete(mid_falling[1])
+        label.delete(low_falling[1])
+        label.delete(high_falling[1])
+        label.delete(pull_falling[1])
+
+    line l_rising = na
+    line l_risingOther = na
+    line mid_rising = na
+    label low_rising = na
+    label high_rising = na
+    label pull_rising = na
+
+    if differenceX > 0
+        l_rising := line.new(x1 = lowestX, y1 = lowestY, x2 = otherLowestX, y2 = otherLowestY,
+             extend=extend.right, color=tColor, width=tLinewidth)
+        line.delete(l_rising[1])
+        
+        risingPointX := lowestX
+        risingPointY := lowestY - (line.get_price(l_rising, highestX) - highestY)
+        
+        l_risingOther := line.new(x1 = risingPointX, y1 = risingPointY, x2 = highestX, y2 = otherHighestY,
+             extend=extend.right, color=tColor, width=tLinewidth)
+        line.delete(l_risingOther[1])
+        
+        mid_risingY1 := (line.get_price(l_rising, lowestX) + line.get_price(l_risingOther, lowestX)) / 2
+        mid_risingY2 := (line.get_price(l_rising, otherHighestX) + line.get_price(l_risingOther, otherHighestX)) / 2
+        
+        if showMiddle
+            mid_rising := line.new(x1 = lowestX, y1 = mid_risingY1, x2 = otherHighestX, y2 = mid_risingY2,
+                 extend=extend.right, color=color.gray, width=tLinewidth)
+            line.delete(mid_rising[1])
+    
+        if showLabels
+            low_rising := label.new(x = lowestX, y = lowestY, text="Low: " + tostring(lowestY),
+                 color=color.green, textcolor=color.black, style=label.style_label_up)
+            label.delete(low_rising[1])
+            
+            high_rising := label.new(x = highestX, y = highestY, text="High: " + tostring(highestY),
+                 color=color.green, textcolor=color.black, style=label.style_label_down)
+            label.delete(high_rising[1])
+            
+            pull_rising := label.new(x = otherLowestX, y = otherLowestY, text="Pullback: " + tostring(otherLowestY) + " / " + 
+                 tostring(truncateTC(plotValueRising, 2))+ "%", color=color.blue, textcolor=color.white,
+                 style=label.style_label_up)
+            label.delete(pull_rising[1])
+    
+    if differenceX < 0 and differenceX[1] >= 0
+        line.delete(l_rising[1])
+        line.delete(l_risingOther[1])
+        line.delete(mid_rising[1])
+        label.delete(low_rising[1])
+        label.delete(high_rising[1])
+        label.delete(pull_rising[1])
+
+// ============================================================================
+// PIVOT HIGHS AND LOWS
+// ============================================================================
+float ph = na, float pl = na
+float src1 =  ppsrc == 'High/Low' ? newHigh : max(newClose, newOpen)
+float src2 =  ppsrc == 'High/Low' ? newLow: min(newClose, newOpen)
+
+ph := pivothigh(src1, prd, prd)
+pl := pivotlow(src2, prd, prd)
+
+plotshape(ph and showpp, text = "H",  style = shape.labeldown, color = na, textcolor = color.new(color.red, 0), location = location.abovebar, offset = -prd)
+plotshape(pl and showpp, text = "L",  style = shape.labelup, color = na, textcolor = color.new(color.lime, 0), location = location.belowbar, offset = -prd)
+
+// ============================================================================
+// SUPPORT AND RESISTANCE
+// ============================================================================
+var pivotvals= array.new_float(0)
+cwidth = 0.0
+
+if showSR
+    prdhighest =  highest(300)
+    prdlowest = lowest(300)
+    cwidth := (prdhighest - prdlowest) * ChannelW / 100
+    
+    if ph or pl
+        array.unshift(pivotvals, ph ? ph : pl)
+        if array.size(pivotvals) > maxnumpp
+            array.pop(pivotvals)
+
+get_sr_vals(ind)=>
+    float lo = array.get(pivotvals, ind)
+    float hi = lo
+    int numpp = 0
+    for y = 0 to array.size(pivotvals) - 1
+        float cpp = array.get(pivotvals, y)
+        float wdth = cpp <= lo ? hi - cpp : cpp - lo
+        if wdth <= cwidth
+            lo := cpp <= lo ? cpp : lo
+            hi := cpp > lo ? cpp : hi
+            numpp := numpp + 1
+    [hi, lo, numpp]  
+
+var sr_up_level = array.new_float(0)
+var sr_dn_level = array.new_float(0)
+sr_strength = array.new_float(0)
+
+find_loc(strength)=>
+    ret = array.size(sr_strength)
+    if ret > 0
+        for i = array.size(sr_strength) - 1 to 0
+            if strength <= array.get(sr_strength, i)
+                break
+            ret := i
+    ret
+
+check_sr(hi, lo, strength)=>
+    ret = true
+    if array.size(sr_up_level) > 0
+        for i = 0 to array.size(sr_up_level) - 1
+            if array.get(sr_up_level, i) >= lo and array.get(sr_up_level, i) <= hi  or 
+               array.get(sr_dn_level, i) >= lo and array.get(sr_dn_level, i) <= hi
+                if strength >= array.get(sr_strength, i)
+                    array.remove(sr_strength, i)
+                    array.remove(sr_up_level, i)
+                    array.remove(sr_dn_level, i)
+                    ret
+                else
+                    ret := false
+                break
+    ret
+
+var int btime = time
+btime := na(time[1]) ? btime : min(btime, time - time[1])
+
+round_it(value)=> 
+    round(value / syminfo.mintick) * syminfo.mintick
+
+truncate(number, decimals) =>
+    factor = pow(10, decimals)
+    int(number * factor) / factor
+
+draw_line(ycoor, Lstyle)=>
+    line.new(x1 = bar_index, 
+             y1 = ycoor, 
+             x2 = bar_index - 1, 
+             y2 = ycoor, 
+             extend = extend.both,
+             color = ycoor >= newClose ? resistancecolor : supportcolor, 
+             style = Lstyle, 
+             width = linewidth)
+
+set_lx(lab, lin)=>
+    label.set_x(lab, x = time + btime * 30)
+    label.set_color(lab, color = label.get_y(lab) >= newClose ? color.red : color.lime)
+    label.set_textcolor(lab, textcolor = label.get_y(lab) >= newClose ? color.white : color.black)
+    line.set_color(lin, color = line.get_y1(lin) >= newClose ? resistancecolor : supportcolor)
+
+var line l1 = na, var line l2 = na, var line l3 = na, var line l4 = na, var line l5 = na, var line l6 = na, var line l7 = na, var line l8 = na, var line l9 = na, var line l10 = na
+var label lb1 = na, var label lb2 = na, var label lb3 = na, var label lb4 = na, var label lb5 = na, var label lb6 = na, var label lb7 = na, var label lb8 = na, var label lb9 = na, var label lb10 = na
+
+if showSR
+    set_lx(lb1, l1), set_lx(lb2, l2), set_lx(lb3, l3), set_lx(lb4, l4), set_lx(lb5, l5), set_lx(lb6, l6), set_lx(lb7, l7), set_lx(lb8, l8), set_lx(lb9, l9), set_lx(lb10, l10)
+
+if (ph or pl) and showSR
+    array.clear(sr_up_level)
+    array.clear(sr_dn_level)
+    array.clear(sr_strength)
+    
+    for x = 0 to array.size(pivotvals) - 1
+        [hi, lo, strength] = get_sr_vals(x)
+        if check_sr(hi, lo, strength)
+            loc = find_loc(strength)
+            if loc < maxnumsr and strength >= min_strength
+                array.insert(sr_strength, loc, strength)
+                array.insert(sr_up_level, loc, hi)
+                array.insert(sr_dn_level, loc, lo)
+                if array.size(sr_strength) > maxnumsr
+                    array.pop(sr_strength)
+                    array.pop(sr_up_level)
+                    array.pop(sr_dn_level)
+    
+    line.delete(l1), line.delete(l2), line.delete(l3), line.delete(l4), line.delete(l5), line.delete(l6), line.delete(l7), line.delete(l8), line.delete(l9), line.delete(l10)
+    label.delete(lb1), label.delete(lb2), label.delete(lb3), label.delete(lb4), label.delete(lb5), label.delete(lb6), label.delete(lb7), label.delete(lb8), label.delete(lb9), label.delete(lb10)
+    
+    if array.size(sr_up_level) and showSR
+        Lstyle = linestyle == 'Dashed' ? line.style_dashed :
+                 linestyle == 'Solid' ? line.style_solid :
+                 line.style_dotted
+        for x = 0 to array.size(sr_up_level) - 1
+            float mid = round_it((array.get(sr_up_level, x) + array.get(sr_dn_level, x)) / 2)
+            
+            if x == 0
+                l1 := draw_line(mid, Lstyle)
+            if x == 1
+                l2 := draw_line(mid, Lstyle)
+            if x == 2
+                l3 := draw_line(mid, Lstyle)
+            if x == 3
+                l4 := draw_line(mid, Lstyle)
+            if x == 4
+                l5 := draw_line(mid, Lstyle)
+            if x == 5
+                l6 := draw_line(mid, Lstyle)
+            if x == 6
+                l7 := draw_line(mid, Lstyle)
+            if x == 7
+                l8 := draw_line(mid, Lstyle)
+            if x == 8
+                l9 := draw_line(mid, Lstyle)
+            if x == 9
+                l10 := draw_line(mid, Lstyle)
+
+f_crossed_over()=>
+    ret = false
+    if array.size(sr_up_level) > 0
+        for x = 0 to array.size(sr_up_level) - 1
+            float mid = round_it((array.get(sr_up_level, x) + array.get(sr_dn_level, x)) / 2)
+            if newClose[1] <= mid and newClose > mid
+                ret := true
+    ret
+
+f_crossed_under()=>
+    ret = false
+    if array.size(sr_up_level) > 0
+        for x = 0 to array.size(sr_up_level) - 1
+            float mid = round_it((array.get(sr_up_level, x) + array.get(sr_dn_level, x)) / 2)
+            if newClose[1] >= mid and newClose < mid
+                ret := true
+    ret
+
+// ============================================================================
+// MOVING AVERAGES & TREND
+// ============================================================================
+tema(src, length) =>
+    xEMA1 = ema(newClose, length)
+    xEMA2 = ema(xEMA1, length)
+    xEMA3 = ema(xEMA2, length)
+    tema = 3 * xEMA1 - 3 * xEMA2 + xEMA3
+
+pricetype = newClose
+price = useCurrentRes ? pricetype : security(syminfo.tickerid, resCustom, pricetype)
+
+shortperiod = 8
+longperiod = 26
+
+smoothinput = 3
+short =  smoothinput == 1 ? sma(price, shortperiod) :
+         smoothinput == 2 ? ema(price, shortperiod) :
+         smoothinput == 3 ? wma(price, shortperiod) :
+         smoothinput == 4 ? linreg(price, shortperiod,0) :
+         smoothinput == 5 ? tema(price, shortperiod) :
+         na
+
+long =   smoothinput == 1 ? sma(price, longperiod) :
+         smoothinput == 2 ? ema(price, longperiod) :
+         smoothinput == 3 ? wma(price, longperiod) :
+         smoothinput == 4 ? linreg(price, longperiod,0) :
+         smoothinput == 5 ? tema(price, longperiod) :
+         na
+
+shortcolor = short > short[0] ? color.lime : short < short[0] ? color.red : color.blue
+longcolor = long > long[0] ? color.lime : long < long[0] ? color.red : color.blue
+
+roc1 = ((short-short[5])/short[5])*100
+roc2 = ((long-long[5])/long[5])*100
+
+avgroc1 = sma(roc1, 55) 
+avgroc2 = sma(roc2, 55)
+
+stdroc = stdev(roc1,55)
+distFromMean = (roc1-avgroc1)/stdroc
+
+rocls = ((long/long[1])-1)*100
+stdrocls = stdev(rocls,4)
+roclsmean = sma(rocls,4)
+distfromrocls = (rocls-roclsmean)/stdrocls
+
+TrendingUp() => short > long 
+TrendingDown() => short < long 
+
+MAcrossing = cross(short, long) ? short : na
+
+Uptrend() => TrendingUp() and TrendingDown()[1]
+Downtrend() => TrendingDown() and TrendingUp()[1]
+
+// ============================================================================
+// ATR TRAILING STOP-LOSS (continued)
+// ============================================================================
+xATRTrailingStop=0.0
+xATRTrailingStop := iff(newClose > nz(xATRTrailingStop[1], 0) and newClose[1] > nz(xATRTrailingStop[1], 0), 
+     max(nz(xATRTrailingStop[1]), newClose - nLoss),iff(newClose < nz(xATRTrailingStop[1], 0) and 
+     newClose[1] < nz(xATRTrailingStop[1], 0), min(nz(xATRTrailingStop[1]), newClose + nLoss), 
+     iff(newClose > nz(xATRTrailingStop[1], 0), newClose - nLoss, newClose + nLoss)))
+
+pos =0.0
+pos :=  iff(newClose[1] < nz(xATRTrailingStop[1], 0) and newClose > nz(xATRTrailingStop[1], 0), 1,
+     iff(newClose[1] > nz(xATRTrailingStop[1], 0) and newClose < nz(xATRTrailingStop[1], 0), -1, nz(pos[1], 0)))
+
+// ============================================================================
+// STOP LOSS & TAKE PROFIT CALCULATIONS
+// ============================================================================
+var slValueLongATR = 0.0
+var slValueShortATR = 0.0
+
+slValueLongATR := positionLong[1] == 1 and tpTrackerLong[1] == 0 ? max(nz(slValueLongATR[1]),newClose - nLoss):na
+slValueShortATR := positionShort[1] == 1 and tpTrackerShort[1] == 0 ? min(nz(slValueShortATR[1],newClose+nLoss), newClose+nLoss):na
+
+slValueLongAtSignal = valuewhen(entryLong[1], slValueLongATR, 0)
+slValueShortAtSignal = valuewhen(entryShort[1], slValueShortATR, 0)
+
+exitLong := LONG and tpTrackerLong[1] == 1 and positionLong[1] == 1
+exitShort := SHORT and tpTrackerShort[1] == 1 and positionShort[1] == 1
+
+buyValue = valuewhen(entryLong, close, 0)
+sellValue = valuewhen(entryShort, close, 0)
+
+tslShort = newClose > slValueShortATR and positionShort[1] == 1 and tslToggle
+tslLong = newClose < slValueLongATR and positionLong[1] == 1 and tslToggle
+
+slDistanceLong = abs(buyValue - slValueLongAtSignal)
+slDistanceShort = abs(sellValue - slValueShortAtSignal)
+
+// Take profit 1:1
+buyTPValue11 = buyValue + slDistanceLong
+tpLong11 = newClose > buyTPValue11 and positionLong[1] == 1 and tpTrackerLong[1] == 0
+
+sellTPValue11 = sellValue - slDistanceShort
+tpShort11 = newClose < sellTPValue11 and positionShort[1] == 1 and tpTrackerShort[1] == 0
+
+// Take profit 2:1
+buyTPValue21 = buyValue + (2 * slDistanceLong)
+tpLong21 = newClose > buyTPValue21 and positionLong[1] == 1 and tpTrackerLong[1] == 1
+
+sellTPValue21 = sellValue - (2 * slDistanceShort)
+tpShort21 = newClose < sellTPValue21 and positionShort[1] == 1 and tpTrackerShort[1] == 1
+
+tpTrackerLong := entryLong ? 0 : tpLong11 ? 1 : tpLong21 ? 2 : nz(tpTrackerLong[1])
+
+tpTrackerShort := entryShort ? 0 : tpShort11 ? 1 : tpShort21 ? 2 : nz(tpTrackerShort[1])
+
+slValueLong = tpTrackerLong == 0 ? slValueLongAtSignal : tpTrackerLong == 1 ? buyValue : tpTrackerLong == 2 ? buyTPValue11 : na
+slLong = newClose < slValueLong and positionLong[1] == 1
+
+slValueShort = tpTrackerShort == 0 ? slValueShortAtSignal : tpTrackerShort == 1 ? sellValue : tpTrackerShort == 2 ? sellTPValue11 : na
+slShort = newClose > slValueShort and positionShort[1] == 1
+
+positionLong := entryLong ? 1 : slLong or tslLong or tpLong21 ? 0 : nz(positionLong[1])
+
+positionShort := entryShort ? 1 : slShort or tslShort or tpShort21 ? 0 : nz(positionShort[1])
+
+// ============================================================================
+// MOMENTUM CANDLES
+// ============================================================================
+barcolor(newClose < short and positionShort == 1 and positionLong == 0 and enableMomentum ? #615cf7 : newClose > short and positionLong == 1 and positionShort == 0 and enableMomentum ? #615cf7 : na, title = "Momentum candles")
+
+// ============================================================================
+// SIGNAL PLOTTING
+// ============================================================================
+// Regular Buy/Sell signals
+plotshape(showSignals ? entryLong and newClose <= smaLabel : na, color=color.new(color.green, 20), style=shape.labelup, text="Buy", textcolor=color.white, location=location.belowbar, size="normal")
+plotshape(showSignals ? entryShort and newClose >= smaLabel : na, color=color.new(color.red, 20), style=shape.labeldown, text="Sell", textcolor=color.white, location=location.abovebar, size="normal")
+
+// Smart Buy/Sell signals (above/below SMA 200)
+plotshape(showSignals ? entryLong and newClose > smaLabel : na, color=color.new(color.green, 20), style=shape.labelup, text="Smart\nBuy", textcolor=color.white, location=location.belowbar, size="normal")
+plotshape(showSignals ? entryShort and newClose < smaLabel : na, color=color.new(color.red, 20), style=shape.labeldown, text="Smart\nSell", textcolor=color.white, location=location.abovebar, size="normal")
+
+// ============================================================================
+// SL/TP PLOTTING
+// ============================================================================
+plot((positionShort == 1 or positionShort[1] == 1) and tslToggle ? slValueShortATR : na, style=plot.style_line, color =color.new(color.red, 50), title="Short TSL")
+plot((positionLong == 1 or positionLong[1] == 1) and tslToggle ? slValueLongATR : na, style=plot.style_line, color=color.new(color.red, 50), title="Long TSL")
+
+// ============================================================================
+// TP/SL AREAS (LABELS & LINES)
+// ============================================================================
+truncate2(number, decimals) =>
+    factor = pow(10, decimals)
+    int(number * factor) / factor
+
+draw_label_tp(ycoor, ratio)=>
+    label.new(x = time + btime * 20, 
+              y = ycoor, text = tostring(ratio) + ":1 TP:  " + tostring(truncate2(ycoor, 4)), 
+              color = color.green,
+              textcolor = color.white, 
+              style = label.style_label_left, 
+              xloc = xloc.bar_time, 
+              yloc = yloc.price)
+
+draw_label_entry(ycoor)=>
+    label.new(x = time + btime * 20, 
+              y = ycoor, text = "Entry: " + tostring(truncate2(ycoor, 4)), 
+              color = color.gray,
+              textcolor = color.white, 
+              style = label.style_label_left, 
+              xloc = xloc.bar_time, 
+              yloc = yloc.price)
+
+draw_label_sl(ycoor)=>
+    label.new(x = time + btime * 20, 
+              y = ycoor, text = "SL: " + tostring(truncate2(ycoor, 4)), 
+              color = color.red,
+              textcolor = color.white, 
+              style = label.style_label_left, 
+              xloc = xloc.bar_time, 
+              yloc = yloc.price)
+
+draw_line_tp(ycoor)=>
+    line.new(x1 = time - btime * 3, 
+             x2 = time + btime * 20,
+              y1 = ycoor, 
+              y2 = ycoor,
+              xloc = xloc.bar_time,
+              color = color.green)
+
+draw_line_entry(ycoor)=>
+    line.new(x1 = time - btime * 3, 
+             x2 = time + btime * 20,
+              y1 = ycoor, 
+              y2 = ycoor,
+              xloc = xloc.bar_time,
+              color = color.gray)
+
+draw_line_sl(ycoor)=>
+    line.new(x1 = time - btime * 3, 
+             x2 = time + btime * 20,
+              y1 = ycoor, 
+              y2 = ycoor,
+              xloc = xloc.bar_time,
+              color = color.red)
+
+label tp11 = na
+label tp21 = na
+label tp31 = na
+label entry = na
+label sl = na
+line tp11_line = na
+line tp21_line = na
+line tp31_line = na
+line entry_line = na
+line sl_line = na
+
+// Long position areas
+if positionLong[1] == 1
+    if showAreas
+        tp11 := draw_label_tp(buyTPValue11, 1)
+        tp21 := draw_label_tp(buyTPValue21, 2)
+        sl := draw_label_sl(slValueLong)
+        entry := draw_label_entry(buyValue)
+        label.delete(tp11[1])
+        label.delete(tp21[1])
+        label.delete(tp31[1])
+        label.delete(entry[1])
+        label.delete(sl[1])
+
+if positionLong == 0 and positionLong[1] == 1
+    label.delete(tp11)
+    label.delete(tp21)
+    label.delete(tp31)
+    label.delete(entry)
+    label.delete(sl)
+
+if positionLong[1] == 1
+    if showAreas
+        tp11_line := draw_line_tp(buyTPValue11)
+        tp21_line := draw_line_tp(buyTPValue21)
+        sl_line := draw_line_sl(slValueLong)
+        entry_line := draw_line_entry(buyValue)
+        line.delete(tp11_line[1])
+        line.delete(tp21_line[1])
+        line.delete(tp31_line[1])
+        line.delete(entry_line[1])
+        line.delete(sl_line[1])
+
+if positionLong == 0 and positionLong[1] == 1
+    line.delete(tp11_line)
+    line.delete(tp21_line)
+    line.delete(tp31_line)
+    line.delete(entry_line)
+    line.delete(sl_line)
+
+// Short position areas
+if positionShort[1] == 1
+    if showAreas
+        tp11 := draw_label_tp(sellTPValue11, 1)
+        tp21 := draw_label_tp(sellTPValue21, 2)
+        sl := draw_label_sl(slValueShort)
+        entry := draw_label_entry(sellValue)
+        label.delete(tp11[1])
+        label.delete(tp21[1])
+        label.delete(tp31[1])
+        label.delete(entry[1])
+        label.delete(sl[1])
+
+if positionShort == 0 and positionShort[1] == 1
+    label.delete(tp11)
+    label.delete(tp21)
+    label.delete(tp31)
+    label.delete(entry)
+    label.delete(sl)
+
+if positionShort[1] == 1
+    if showAreas
+        tp11_line := draw_line_tp(sellTPValue11)
+        tp21_line := draw_line_tp(sellTPValue21)
+        sl_line := draw_line_sl(slValueShort)
+        entry_line := draw_line_entry(sellValue)
+        line.delete(tp11_line[1])
+        line.delete(tp21_line[1])
+        line.delete(tp31_line[1])
+        line.delete(entry_line[1])
+        line.delete(sl_line[1])
+
+if positionShort == 0 and positionShort[1] == 1
+    line.delete(tp11_line)
+    line.delete(tp21_line)
+    line.delete(tp31_line)
+    line.delete(entry_line)
+    line.delete(sl_line)
+
+// ============================================================================
+// SIGNAL DEFINITIONS FOR ALERTS
+// ============================================================================
+
+// Entry signals
+buySignal = entryLong and newClose <= smaLabel
+smartBuySignal = entryLong and newClose > smaLabel
+sellSignal = entryShort and newClose >= smaLabel
+smartSellSignal = entryShort and newClose < smaLabel
+
+// ============================================================================
+// ALERT CONDITIONS - ONLY 4 WEBHOOK ALERTS
+// ============================================================================
+// ✅ All alerts have default JSON messages with correct {{plot_X}} syntax
+// ✅ Compatible with your MT5 dashboard webhook at /api/webhook
+// ✅ Only BUY/SELL entry signals - notifications removed as requested
+// ============================================================================
+
+// Alert 1: Regular BUY Signal (below SMA 200)
+alertcondition(buySignal, title="🟢 BUY Signal", message='{"type":"BUY","symbol":"{{ticker}}","price":"{{close}}","stopLoss":"{{plot_0}}","takeProfit":"{{plot_1}}","indicator":"Elite_Algo_v13"}')
+
+// Alert 2: Smart BUY Signal (above SMA 200)
+alertcondition(smartBuySignal, title="🟢 SMART BUY Signal", message='{"type":"BUY","symbol":"{{ticker}}","price":"{{close}}","stopLoss":"{{plot_0}}","takeProfit":"{{plot_1}}","indicator":"Elite_Algo_v13","signalType":"SMART"}')
+
+// Alert 3: Regular SELL Signal (above SMA 200)
+alertcondition(sellSignal, title="🔴 SELL Signal", message='{"type":"SELL","symbol":"{{ticker}}","price":"{{close}}","stopLoss":"{{plot_2}}","takeProfit":"{{plot_3}}","indicator":"Elite_Algo_v13"}')
+
+// Alert 4: Smart SELL Signal (below SMA 200)
+alertcondition(smartSellSignal, title="🔴 SMART SELL Signal", message='{"type":"SELL","symbol":"{{ticker}}","price":"{{close}}","stopLoss":"{{plot_2}}","takeProfit":"{{plot_3}}","indicator":"Elite_Algo_v13","signalType":"SMART"}')
